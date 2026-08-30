@@ -58,6 +58,38 @@ jobs:
           bash scripts/fetch-upstream.sh "$VERSION"
       - name: Patch and build
         run: bash scripts/build.sh
+      - name: Sign, notarize, staple
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          APP=upstream/build/Release/Skim.app
+          KC="$RUNNER_TEMP/build.keychain-db"
+          KC_PASS=$(openssl rand -base64 24)
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC" login.keychain-db
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" | awk 'NR==1{print $2}')
+          echo "signing with identity $IDENTITY"
+          codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
+          codesign --verify --deep --strict "$APP"
+          printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          ditto -c -k --keepParent "$APP" notarize.zip
+          xcrun notarytool submit notarize.zip \
+            --key "$RUNNER_TEMP/AuthKey.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute -v "$APP"
+          ditto -c -k --keepParent "$APP" Skim-plus.zip
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,7 +99,7 @@ jobs:
           gh release create "v${VERSION}" "Skim-plus-${VERSION}.zip" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Skim+ ${VERSION}" \
-            --notes "Upstream Skim ${VERSION} with the patches in \`patches/\` applied. Ad-hoc signed: after unzipping, run \`xattr -dr com.apple.quarantine Skim.app\` (or right-click → Open). Build log in the Actions run for this tag."
+            --notes "Upstream Skim ${VERSION} with the patches in \`patches/\` applied. Signed (Developer ID) and notarized — unzip and run. Build log in the Actions run for this tag."
       - name: Flag on failure
         if: failure()
         env:

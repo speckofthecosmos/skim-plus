@@ -22,13 +22,7 @@ d.set(c, forKey: "SKDarkBackgroundColor"); d.set(c, forKey: "SKDarkFullScreenBac
 
 ## Install
 
-Grab the latest zip from [Releases](../../releases). Builds are ad-hoc signed (not notarized), so macOS will quarantine the download:
-
-```sh
-xattr -dr com.apple.quarantine Skim.app
-```
-
-or right-click → Open the first time. If you'd rather not run an unsigned binary from a stranger — reasonable — build it yourself:
+Grab the latest zip from [Releases](../../releases), unzip, drag `Skim.app` to Applications. Builds are Developer ID-signed and notarized by Apple, so they open like any other download. Prefer not to run a stranger's binary at all? Build it yourself:
 
 ## Build it yourself
 
