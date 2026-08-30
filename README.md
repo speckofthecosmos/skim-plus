@@ -46,6 +46,10 @@ Requires full Xcode (not just Command Line Tools). The scripts encode the two no
 
 A [weekly workflow](.github/workflows/upstream.yml) reads Skim's Sparkle appcast. When upstream ships a version this repo hasn't built, the macOS runner fetches the new tag, applies the patches, verifies the patched constant landed in the binary, and publishes a release. If a patch stops applying, the workflow opens an issue instead.
 
+## Contributing
+
+Did upstream decline your feature as out of scope? PRs adding it here as a patch are welcome, under the rule above: your patch must only *expose an option* (hidden preference, menu item, or a control in the Advanced pane) — with nothing set, behavior stays bit-for-bit stock. Small, self-contained patches in code regions upstream rarely touches have the best odds; each accepted patch has to survive rebasing onto every future Skim release. Link the upstream ticket in your PR so the trail from "declined" to "available" stays walkable.
+
 ## License
 
 Skim is BSD-licensed; the patches and scripts here are under the same [BSD license](LICENSE) as upstream.
