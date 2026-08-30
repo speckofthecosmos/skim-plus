@@ -29,12 +29,14 @@ xcodebuild -project upstream/Skim.xcodeproj -target Skim -configuration Release 
 APP="$SYM/Release/Skim.app"
 [ -d "$APP" ] || { echo "build produced no app"; exit 1; }
 
-# sanity: the pre-patch constant must be gone from the binary
+# sanity: the Skim+ pref keys must be present in the binary (upstream keeps its
+# constants — the design rule is unset prefs = stock behavior)
 python3 - "$APP/Contents/MacOS/Skim" <<'PY'
-import struct, sys
+import sys
 data = open(sys.argv[1], 'rb').read()
-assert data.find(struct.pack('<d', 1.8972)) == -1, "unpatched constant found in binary"
-print("patch verified in binary")
+for key in (b'SKInvertedDarkModeBackgroundGray', b'SKToolTipDelay', b'SKToolTipAutoHideTime'):
+    assert key in data, f"missing patched pref key: {key.decode()}"
+print("patches verified in binary")
 PY
 
 ditto -c -k --keepParent "$APP" Skim-plus.zip
