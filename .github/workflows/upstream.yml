@@ -79,7 +79,21 @@ jobs:
           security list-keychains -d user -s "$KC" login.keychain-db
           IDENTITY=$(security find-identity -v -p codesigning "$KC" | awk 'NR==1{print $2}')
           echo "signing with identity $IDENTITY"
-          codesign --force --deep --options runtime --timestamp --sign "$IDENTITY" "$APP"
+          # Sign inside-out: --deep misses SharedSupport tools and the QuickLook
+          # generator (notarization then fails: no Dev ID, no hardened runtime,
+          # leftover get-task-allow). Every nested Mach-O first, then nested code
+          # bundles deepest-first, then the app.
+          find "$APP" -type f \( -perm -u+x -o -name '*.dylib' \) -print0 |
+            while IFS= read -r -d '' f; do
+              if file -b "$f" | grep -q 'Mach-O'; then
+                codesign --force --options runtime --timestamp --sign "$IDENTITY" "$f"
+              fi
+            done
+          find "$APP" -depth \( -name '*.framework' -o -name '*.xpc' -o -name '*.app' -o -name '*.qlgenerator' -o -name '*.plugin' -o -name '*.appex' -o -name '*.mdimporter' \) -not -path "$APP" -print0 |
+            while IFS= read -r -d '' b; do
+              codesign --force --options runtime --timestamp --sign "$IDENTITY" "$b"
+            done
+          codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
           codesign --verify --deep --strict "$APP"
           printf '%s' "$NOTARY_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           ditto -c -k --keepParent "$APP" notarize.zip
