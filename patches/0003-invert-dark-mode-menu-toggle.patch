@@ -1,0 +1,40 @@
+View-menu toggle for "Invert Colors in Dark Mode" (declined upstream as scope):
+  https://sourceforge.net/p/skim-app/feature-requests/1659/
+Adds a checkmarked View-menu item bound to the SKInvertColorsInDarkMode
+hidden pref; SKBasePDFView already observes the key, so it takes effect live.
+
+--- SKApplicationController.m
++++ SKApplicationController.m
+@@ -206,6 +206,11 @@
+             [menuItem setIndentationLevel:1];
+     }
+     
++    // Skim+: menu toggle for "Invert colors in dark mode" (upstream #1659)
++    [menu addItem:[NSMenuItem separatorItem]];
++    NSMenuItem *invertItem = [menu addItemWithTitle:NSLocalizedString(@"Invert Colors in Dark Mode", @"Menu item title") action:@selector(toggleInvertColorsInDarkMode:) keyEquivalent:@""];
++    [invertItem setTarget:self];
++
+     // this creates the script menu if needed
+     (void)[NSApp scriptMenu];
+     
+@@ -414,9 +419,20 @@
+ }
+ 
+ - (IBAction)changeFindPaneState:(id)sender {}
++
++// Skim+: toggle the SKInvertColorsInDarkMode hidden pref (upstream #1659);
++// SKBasePDFView observes the key, so views update live.
++- (void)toggleInvertColorsInDarkMode:(id)sender {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++    [sud setBool:[sud boolForKey:SKInvertColorsInDarkModeKey] == NO forKey:SKInvertColorsInDarkModeKey];
++}
+ 
+ - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+     SEL action = [menuItem action];
++    if (action == @selector(toggleInvertColorsInDarkMode:)) {
++        [menuItem setState:[[NSUserDefaults standardUserDefaults] boolForKey:SKInvertColorsInDarkModeKey] ? NSControlStateValueOn : NSControlStateValueOff];
++        return YES;
++    }
+     if (action == @selector(orderFrontLineInspector:)) {
+         if ([SKLineInspector sharedLineInspectorExists] && [[[SKLineInspector sharedLineInspector] window] isVisible])
+             [menuItem setTitle:NSLocalizedString(@"Hide Lines", @"Menu item title")];

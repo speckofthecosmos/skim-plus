@@ -1,0 +1,53 @@
+Hidden preferences for tooltip timing (declined upstream as scope):
+  https://sourceforge.net/p/skim-app/feature-requests/1757/ (SKToolTipDelay)
+  https://sourceforge.net/p/skim-app/feature-requests/1312/ (display duration)
+  https://sourceforge.net/p/skim-app/feature-requests/1325/ (disable tooltips)
+
+defaults write net.sourceforge.skim-app.skim SKToolTipDelay -float 0.5   # show delay, seconds
+defaults write net.sourceforge.skim-app.skim SKToolTipDelay -float -1    # disable tooltips
+defaults write net.sourceforge.skim-app.skim SKToolTipAutoHideTime -float 30  # auto-hide, seconds
+Unset keys keep upstream behavior (1.5s delay, 10s auto-hide).
+
+--- SKImageToolTipWindow.m
++++ SKImageToolTipWindow.m
+@@ -55,7 +55,17 @@
+ #define DEFAULT_SCALE           -2.0
+ 
+ #define SKToolTipScaleKey @"SKToolTipScale"
++#define SKToolTipDelayKey @"SKToolTipDelay"
++#define SKToolTipAutoHideTimeKey @"SKToolTipAutoHideTime"
+ 
++// Skim+: hidden prefs for tooltip timing (upstream #1757, #1312, #1325).
++// SKToolTipDelay: seconds before the tooltip shows; unset/0 = upstream default;
++// negative = tooltips disabled. SKToolTipAutoHideTime: seconds before auto-hide.
++static NSTimeInterval SKToolTipShowDelay(void) {
++    NSTimeInterval delay = [[NSUserDefaults standardUserDefaults] doubleForKey:SKToolTipDelayKey];
++    return delay == 0.0 ? DEFAULT_SHOW_DELAY : delay;
++}
++
+ @implementation SKImageToolTipWindow
+ 
+ @synthesize currentImageContext=context;
+@@ -79,7 +89,8 @@
+         [self setHasShadow:YES];
+         [self setLevel:WINDOW_LEVEL];
+         [self setDefaultAlphaValue:ALPHA_VALUE];
+-        [self setAutoHideTimeInterval:AUTO_HIDE_TIME_INTERVAL];
++        NSTimeInterval autoHide = [[NSUserDefaults standardUserDefaults] doubleForKey:SKToolTipAutoHideTimeKey];
++        [self setAutoHideTimeInterval:autoHide > 0.0 ? autoHide : AUTO_HIDE_TIME_INTERVAL];
+         context = nil;
+         point = NSZeroPoint;
+         image = nil;
+@@ -203,8 +214,11 @@
+         image = nil;
+         shouldShow = NO;
+         
++        NSTimeInterval showDelay = SKToolTipShowDelay();
++        if (showDelay < 0.0)
++            return;
+         [self performSelector:@selector(generateImage) withObject:nil afterDelay:GENERATE_DELAY];
+-        [self performSelector:@selector(showDelayed) withObject:nil afterDelay:[self isVisible] ? ALT_SHOW_DELAY : DEFAULT_SHOW_DELAY];
++        [self performSelector:@selector(showDelayed) withObject:nil afterDelay:[self isVisible] ? ALT_SHOW_DELAY : showDelay];
+     }
+ }
+ 
