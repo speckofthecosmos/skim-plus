@@ -1,0 +1,80 @@
+name: watch-and-build
+
+on:
+  schedule:
+    - cron: '17 9 * * 1'   # Mondays 09:17 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Force-build this upstream version (e.g. 1.7.15); empty = latest from appcast'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCED: ${{ github.event.inputs.version }}
+        run: |
+          if [ -n "$FORCED" ]; then
+            echo "version=$FORCED" >> "$GITHUB_OUTPUT"
+            echo "forced build of $FORCED"
+            exit 0
+          fi
+          LATEST=$(curl -fsS https://skim-app.sourceforge.io/skim.xml \
+            | grep -o 'sparkle:shortVersionString="[0-9.]*"' \
+            | head -1 | cut -d'"' -f2)
+          [ -n "$LATEST" ] || { echo "could not parse appcast"; exit 1; }
+          if gh release view "v$LATEST" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "v$LATEST already released — nothing to do"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            echo "new upstream version: $LATEST"
+            echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.version != ''
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install svn
+        run: brew install subversion
+      - name: Fetch upstream
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9][0-9.]*$ ]] || { echo "refusing suspicious version: $VERSION"; exit 1; }
+          bash scripts/fetch-upstream.sh "$VERSION"
+      - name: Patch and build
+        run: bash scripts/build.sh
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          mv Skim-plus.zip "Skim-plus-${VERSION}.zip"
+          gh release create "v${VERSION}" "Skim-plus-${VERSION}.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Skim+ ${VERSION}" \
+            --notes "Upstream Skim ${VERSION} with the patches in \`patches/\` applied. Ad-hoc signed: after unzipping, run \`xattr -dr com.apple.quarantine Skim.app\` (or right-click → Open). Build log in the Actions run for this tag."
+      - name: Flag on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Needs attention: build failed for upstream ${VERSION}" \
+            --body "The automated build for upstream Skim ${VERSION} failed — most likely a patch in \`patches/\` no longer applies to the new source. See the failed run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || true
