@@ -34,7 +34,7 @@ APP="$SYM/Release/Skim.app"
 python3 - "$APP/Contents/MacOS/Skim" <<'PY'
 import sys
 data = open(sys.argv[1], 'rb').read()
-for key in (b'SKInvertedDarkModeBackgroundGray', b'SKToolTipDelay', b'SKToolTipAutoHideTime'):
+for key in (b'SKInvertedDarkModeBackgroundGray', b'SKToolTipDelay', b'SKToolTipAutoHideTime', b'SKPlusPreferences', b'SKPlusInvertMath'):
     assert key in data, f"missing patched pref key: {key.decode()}"
 print("patches verified in binary")
 PY

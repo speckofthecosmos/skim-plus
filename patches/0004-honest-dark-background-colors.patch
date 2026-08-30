@@ -1,0 +1,229 @@
+Honest dark-mode background colors + live filter updates.
+
+The stored SKDarkBackgroundColor/SKDarkFullScreenBackgroundColor now mean
+"the color you see": when the inverted-dark-mode filter would process the
+window background, the render chokepoint feeds it a pre-compensated color
+so the stored color renders literally (upstream #1774). Adds shared invert
+math (SKPlusInvertMath), live re-push of backgrounds when invert state or
+the Skim+ background level change, and live filter rebuild on the level.
+Colors outside the filter's gamut render as their nearest achievable color.
+
+--- /dev/null
++++ SKPlusInvertMath.h
+@@ -0,0 +1,31 @@
++//
++//  SKPlusInvertMath.h
++//  Skim+
++//
++//  Shared math for the inverted-dark-mode filter: computing the current
++//  strength factor, and pre-compensating colors so a stored color renders
++//  literally under the filter. Mirrors colorInvertFilters in
++//  NSGraphics_SKExtensions.m — keep the two in sync.
++//  Part of the Skim+ patch set (https://github.com/speckofthecosmos/skim-plus).
++//  License: BSD, same as Skim.
++//
++
++#import <Cocoa/Cocoa.h>
++
++NS_ASSUME_NONNULL_BEGIN
++
++#define SKInvertedDarkModeBackgroundGrayKey @"SKInvertedDarkModeBackgroundGray"
++
++// The strength factor f the invert filter is currently using
++extern double SKPlusCurrentInvertF(void);
++
++// YES when content is being rendered through the invert filter
++extern BOOL SKPlusInvertRenderingActive(void);
++
++// Forward transform: what `color` looks like after the invert filter at strength f
++extern NSColor *SKPlusRenderedColor(NSColor *color, double f);
++
++// Inverse transform: the color to FEED the filter so it renders `desired`
++extern NSColor *SKPlusPreInvertedColor(NSColor *desired, double f);
++
++NS_ASSUME_NONNULL_END
+--- /dev/null
++++ SKPlusInvertMath.m
+@@ -0,0 +1,62 @@
++//
++//  SKPlusInvertMath.m
++//  Skim+
++//
++//  See SKPlusInvertMath.h. The filter chain (per channel, linear space) is:
++//  gamma 0.625 -> out_i = in_i - f*L + 1 (L = Rec.709 luminance) -> gamma 1.6.
++//  License: BSD, same as Skim.
++//
++
++#import "SKPlusInvertMath.h"
++#import "SKStringConstants.h"
++#import "NSGraphics_SKExtensions.h"
++
++#define LUM_R 0.2126
++#define LUM_G 0.7152
++#define LUM_B 0.0722
++
++static double toLinear(double c) { return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4); }
++static double fromLinear(double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
++static double clamp01(double c) { return fmin(fmax(c, 0.0), 1.0); }
++
++double SKPlusCurrentInvertF(void) {
++    NSNumber *bgGray = [[NSUserDefaults standardUserDefaults] objectForKey:SKInvertedDarkModeBackgroundGrayKey];
++    if (bgGray) {
++        double gray = clamp01([bgGray doubleValue]);
++        return 2.0 - pow(toLinear(gray), 0.625);
++    }
++    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972;
++}
++
++BOOL SKPlusInvertRenderingActive(void) {
++    return SKHasDarkAppearance() && [[NSUserDefaults standardUserDefaults] boolForKey:SKInvertColorsInDarkModeKey];
++}
++
++NSColor *SKPlusRenderedColor(NSColor *color, double f) {
++    NSColor *c = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
++    double r = pow(toLinear([c redComponent]), 0.625);
++    double g = pow(toLinear([c greenComponent]), 0.625);
++    double b = pow(toLinear([c blueComponent]), 0.625);
++    double L = LUM_R * r + LUM_G * g + LUM_B * b;
++    double outR = pow(clamp01(r - f * L + 1.0), 1.6);
++    double outG = pow(clamp01(g - f * L + 1.0), 1.6);
++    double outB = pow(clamp01(b - f * L + 1.0), 1.6);
++    return [NSColor colorWithSRGBRed:fromLinear(outR) green:fromLinear(outG) blue:fromLinear(outB) alpha:1.0];
++}
++
++NSColor *SKPlusPreInvertedColor(NSColor *desired, double f) {
++    if (f <= 1.0001)
++        return desired; // degenerate filter; identity is the least-wrong answer
++    NSColor *d = [desired colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
++    // From out = (c - f*L + 1)^1.6: t = out^(1/1.6); luminance of both sides
++    // gives L = (1 - Lt) / (f - 1); then c = t + f*L - 1.
++    double tR = pow(toLinear([d redComponent]), 1.0 / 1.6);
++    double tG = pow(toLinear([d greenComponent]), 1.0 / 1.6);
++    double tB = pow(toLinear([d blueComponent]), 1.0 / 1.6);
++    double Lt = LUM_R * tR + LUM_G * tG + LUM_B * tB;
++    double L = (1.0 - Lt) / (f - 1.0);
++    double r = pow(clamp01(tR + f * L - 1.0), 1.0 / 0.625);
++    double g = pow(clamp01(tG + f * L - 1.0), 1.0 / 0.625);
++    double b = pow(clamp01(tB + f * L - 1.0), 1.0 / 0.625);
++    return [NSColor colorWithSRGBRed:fromLinear(r) green:fromLinear(g) blue:fromLinear(b) alpha:1.0];
++}
+--- PDFView_SKExtensions.m
++++ PDFView_SKExtensions.m
+@@ -47,6 +47,7 @@
+ #import "NSUserDefaults_SKExtensions.h"
+ #import "SKStringConstants.h"
+ #import "NSGraphics_SKExtensions.h"
++#import "SKPlusInvertMath.h"
+ #import "SKApplication.h"
+ #import "NSView_SKExtensions.h"
+ #import "NSImage_SKExtensions.h"
+@@ -332,8 +333,14 @@
+ 
+ static NSColor *defaultBackgroundColor(NSString *backgroundColorKey, NSString *darkBackgroundColorKey) {
+     NSColor *color = nil;
+-    if (SKHasDarkAppearance())
++    if (SKHasDarkAppearance()) {
+         color = [[NSUserDefaults standardUserDefaults] colorForKey:darkBackgroundColorKey];
++        // Skim+: the stored color means "what the user wants to SEE". When the
++        // inverted-dark-mode filter will process this background, pre-compensate
++        // so the filter renders the stored color literally (upstream #1774).
++        if (color && SKPlusInvertRenderingActive())
++            color = SKPlusPreInvertedColor(color, SKPlusCurrentInvertF());
++    }
+     if (color == nil)
+         color = [[NSUserDefaults standardUserDefaults] colorForKey:backgroundColorKey];
+     return color;
+--- SKBasePDFView.m
++++ SKBasePDFView.m
+@@ -38,6 +38,7 @@
+ 
+ #import "SKBasePDFView.h"
+ #import "SKStringConstants.h"
++#import "SKPlusInvertMath.h"
+ #import "NSGeometry_SKExtensions.h"
+ #import "NSGraphics_SKExtensions.h"
+ #import "NSEvent_SKExtensions.h"
+@@ -72,7 +73,8 @@
+ 
+ static inline NSArray *defaultKeysToObserve() {
+     if (@available(macOS 10.14, *))
+-        return @[SKInvertColorsInDarkModeKey, SKSepiaToneKey, SKWhitePointKey];
++        // Skim+: also rebuild filters when the inverted-background level changes
++        return @[SKInvertColorsInDarkModeKey, SKSepiaToneKey, SKWhitePointKey, SKInvertedDarkModeBackgroundGrayKey];
+     else
+         return @[SKSepiaToneKey, SKWhitePointKey];
+ }
+--- SKMainWindowController.m
++++ SKMainWindowController.m
+@@ -45,6 +45,7 @@
+ #import "SKRightSideViewController.h"
+ #import <Quartz/Quartz.h>
+ #import "SKStringConstants.h"
++#import "SKPlusInvertMath.h"
+ #import "SKNoteWindowController.h"
+ #import "SKInfoWindowController.h"
+ #import "SKBookmarkController.h"
+@@ -2539,6 +2540,8 @@
+     NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
+     for (NSString *key in @[SKBackgroundColorKey, SKFullScreenBackgroundColorKey,
+                             SKDarkBackgroundColorKey, SKDarkFullScreenBackgroundColorKey,
++                            // Skim+: background pre-compensation depends on these
++                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey,
+                             SKThumbnailSizeKey, SKSnapshotThumbnailSizeKey,
+                             SKInterpolationQualityKey,
+                             SKTableFontSizeKey])
+@@ -2555,6 +2558,8 @@
+     NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
+     for (NSString *key in @[SKBackgroundColorKey, SKFullScreenBackgroundColorKey,
+                             SKDarkBackgroundColorKey, SKDarkFullScreenBackgroundColorKey,
++                            // Skim+: background pre-compensation depends on these
++                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey,
+                             SKThumbnailSizeKey, SKSnapshotThumbnailSizeKey,
+                             SKInterpolationQualityKey,
+                             SKTableFontSizeKey]) {
+@@ -2635,7 +2640,8 @@
+     if (context == &SKMainWindowDefaultsObservationContext) {
+         
+         // A default value that we are observing has changed
+-        if ([keyPath isEqualToString:SKBackgroundColorKey] || [keyPath isEqualToString:SKDarkBackgroundColorKey]) {
++        if ([keyPath isEqualToString:SKBackgroundColorKey] || [keyPath isEqualToString:SKDarkBackgroundColorKey] ||
++            [keyPath isEqualToString:SKInvertColorsInDarkModeKey] || [keyPath isEqualToString:SKInvertedDarkModeBackgroundGrayKey]) {
+             NSColor *backgroundColor = nil;
+             if (interactionMode == SKNormalMode)
+                 backgroundColor = [PDFView defaultBackgroundColor];
+--- Skim.xcodeproj/project.pbxproj
++++ Skim.xcodeproj/project.pbxproj
+@@ -325,6 +325,7 @@
+ 		CEF60F2C114C53DC0074ACC4 /* SKDisplayPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF60F2B114C53DC0074ACC4 /* SKDisplayPreferences.m */; };
+ 		CEF60F2F114C54090074ACC4 /* SKNotesPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF60F2E114C54090074ACC4 /* SKNotesPreferences.m */; };
+ 		CEF60F32114C54360074ACC4 /* SKSyncPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */; };
++		AB5C1B0001000000000000B3 /* SKPlusInvertMath.m in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */; };
+ 		CEF64E361160CBAC001C10C8 /* MainToolbar.xib in Resources */ = {isa = PBXBuildFile; fileRef = CEF64E351160CBAC001C10C8 /* MainToolbar.xib */; };
+ 		CEF7117F0B90B58F003A2771 /* SKVersionNumber.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF7117D0B90B58E003A2771 /* SKVersionNumber.m */; };
+ 		CEF711A10B90B714003A2771 /* NSUserDefaultsController_SKExtensions.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF711A00B90B714003A2771 /* NSUserDefaultsController_SKExtensions.m */; };
+@@ -1448,6 +1449,8 @@
+ 		CEF60F2E114C54090074ACC4 /* SKNotesPreferences.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKNotesPreferences.m; sourceTree = "<group>"; };
+ 		CEF60F30114C54360074ACC4 /* SKSyncPreferences.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SKSyncPreferences.h; sourceTree = "<group>"; };
+ 		CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKSyncPreferences.m; sourceTree = "<group>"; };
++		AB5C1B0001000000000000B1 /* SKPlusInvertMath.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SKPlusInvertMath.h; sourceTree = "<group>"; };
++		AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKPlusInvertMath.m; sourceTree = "<group>"; };
+ 		CEF64E351160CBAC001C10C8 /* MainToolbar.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MainToolbar.xib; sourceTree = "<group>"; };
+ 		CEF7117C0B90B58E003A2771 /* SKVersionNumber.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SKVersionNumber.h; sourceTree = "<group>"; };
+ 		CEF7117D0B90B58E003A2771 /* SKVersionNumber.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SKVersionNumber.m; sourceTree = "<group>"; };
+@@ -1919,6 +1922,8 @@
+ 				CEF60F2E114C54090074ACC4 /* SKNotesPreferences.m */,
+ 				CEF60F30114C54360074ACC4 /* SKSyncPreferences.h */,
+ 				CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */,
++				AB5C1B0001000000000000B1 /* SKPlusInvertMath.h */,
++				AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */,
+ 			);
+ 			name = Controllers;
+ 			sourceTree = "<group>";
+@@ -3208,6 +3213,7 @@
+ 				CEF60F2C114C53DC0074ACC4 /* SKDisplayPreferences.m in Sources */,
+ 				CEF60F2F114C54090074ACC4 /* SKNotesPreferences.m in Sources */,
+ 				CEF60F32114C54360074ACC4 /* SKSyncPreferences.m in Sources */,
++				AB5C1B0001000000000000B3 /* SKPlusInvertMath.m in Sources */,
+ 				CE0E8651114DBF7000E37F38 /* SKStaticToolbarWindow.m in Sources */,
+ 				CE8388BC115BC61F00DB1AD7 /* SKNoteTypeSheetController.m in Sources */,
+ 				CE8BEFE3115F75590029020F /* SKSideViewController.m in Sources */,

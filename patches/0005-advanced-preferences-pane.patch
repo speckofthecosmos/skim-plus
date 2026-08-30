@@ -1,0 +1,453 @@
+Advanced preferences pane (Skim+).
+
+Fifth pane surfacing the Skim+ hidden preferences and a few of upstream's:
+inverted page background level, tooltip timing, dark background colors
+(WYSIWYG, gamut-snapped swatches), sequential page numbering. Also sets the
+preference toolbar style so all five pane items fit the item strip.
+
+--- /dev/null
++++ SKPlusPreferences.h
+@@ -0,0 +1,32 @@
++//
++//  SKPlusPreferences.h
++//  Skim+
++//
++//  Advanced preference pane surfacing hidden preferences.
++//  Part of the Skim+ patch set (https://github.com/speckofthecosmos/skim-plus).
++//  License: BSD, same as Skim.
++//
++
++#import <Cocoa/Cocoa.h>
++#import "SKPreferenceController.h"
++
++NS_ASSUME_NONNULL_BEGIN
++
++@interface SKPlusPreferences : NSViewController <SKPreferencePane> {
++    NSButton *invertBackgroundCheckbox;
++    NSSlider *invertBackgroundSlider;
++    NSTextField *invertBackgroundLabel;
++    NSPopUpButton *toolTipModePopUp;
++    NSTextField *toolTipDelayField;
++    NSTextField *toolTipAutoHideField;
++    NSColorWell *darkBackgroundWell;
++    NSColorWell *darkFullScreenBackgroundWell;
++    NSButton *sequentialNumberingCheckbox;
++    BOOL updatingControls;
++}
++
++- (NSString *)title;
++
++@end
++
++NS_ASSUME_NONNULL_END
+--- /dev/null
++++ SKPlusPreferences.m
+@@ -0,0 +1,341 @@
++//
++//  SKPlusPreferences.m
++//  Skim+
++//
++//  Advanced preference pane surfacing hidden preferences. Design rule: this
++//  pane only exposes options — every control has an explicit "stock" state
++//  that removes its key, and an unset key means upstream behavior, bit for bit.
++//  Part of the Skim+ patch set (https://github.com/speckofthecosmos/skim-plus).
++//  License: BSD, same as Skim.
++//
++
++#import "SKPlusPreferences.h"
++#import "SKStringConstants.h"
++#import "NSUserDefaults_SKExtensions.h"
++#import "NSGraphics_SKExtensions.h"
++#import "SKPlusInvertMath.h"
++
++#define SKToolTipDelayKey @"SKToolTipDelay"
++#define SKToolTipAutoHideTimeKey @"SKToolTipAutoHideTime"
++
++// Upstream's hardcoded fallbacks, shown when a key is unset
++#define UPSTREAM_INVERT_GRAY (45.0 / 255.0)
++#define UPSTREAM_TOOLTIP_DELAY 1.5
++#define UPSTREAM_TOOLTIP_AUTOHIDE 10.0
++
++enum { SKToolTipModeDefault = 0, SKToolTipModeCustom = 1, SKToolTipModeNever = 2 };
++
++@implementation SKPlusPreferences
++
+++ (void)initialize {
++    if (self != [SKPlusPreferences class]) return;
++    // Register a toolbar icon under our nibName so imageNamed: resolves it.
++    // NB: an SF-symbol NSImage is a dynamic image and can refuse setName:
++    // (leaving imageNamed: nil and the toolbar item invisible), so rasterize
++    // the symbol into an ordinary template image first.
++    NSImage *symbol = [NSImage imageWithSystemSymbolName:@"slider.horizontal.3" accessibilityDescription:@"Advanced"] ?: [NSImage imageNamed:NSImageNameAdvanced];
++    NSImage *icon = [NSImage imageWithSize:NSMakeSize(28.0, 28.0) flipped:NO drawingHandler:^BOOL(NSRect rect) {
++        [symbol drawInRect:rect fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0];
++        return YES;
++    }];
++    [icon setTemplate:YES];
++    [icon setName:@"SKPlusPreferences"];
++}
++
++- (NSString *)nibName { return @"SKPlusPreferences"; }
++
++- (NSString *)title { return NSLocalizedString(@"Advanced", @"Preference pane label"); }
++
++#pragma mark View construction
++
++static NSTextField *SKPlusLabel(NSString *text) {
++    NSTextField *label = [NSTextField labelWithString:text];
++    [label setAlignment:NSTextAlignmentRight];
++    return label;
++}
++
++static NSTextField *SKPlusHeader(NSString *text) {
++    NSTextField *header = [NSTextField labelWithString:text];
++    [header setFont:[NSFont systemFontOfSize:[NSFont systemFontSize] weight:NSFontWeightSemibold]];
++    return header;
++}
++
++static NSBox *SKPlusSeparator(void) {
++    NSBox *box = [[NSBox alloc] init];
++    [box setBoxType:NSBoxSeparator];
++    return box;
++}
++
++static NSTextField *SKPlusCaption(NSString *text) {
++    // Single-line label: a wrapping label has no honest intrinsic height until
++    // it knows its width, which under-reports the pane's fittingSize and makes
++    // the window overlap its bottom Reset buttons.
++    NSTextField *caption = [NSTextField labelWithString:text];
++    [caption setFont:[NSFont systemFontOfSize:[NSFont smallSystemFontSize]]];
++    [caption setTextColor:[NSColor secondaryLabelColor]];
++    return caption;
++}
++
++- (void)loadView {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++
++    // --- Inverted dark mode background ---
++    invertBackgroundCheckbox = [NSButton checkboxWithTitle:NSLocalizedString(@"Custom page background in inverted dark mode:", @"Checkbox title")
++                                                    target:self action:@selector(changeInvertBackground:)];
++    invertBackgroundSlider = [NSSlider sliderWithValue:UPSTREAM_INVERT_GRAY minValue:0.0 maxValue:0.5
++                                                target:self action:@selector(changeInvertBackground:)];
++    [invertBackgroundSlider setControlSize:NSControlSizeSmall];
++    [[invertBackgroundSlider widthAnchor] constraintGreaterThanOrEqualToConstant:160.0].active = YES;
++    invertBackgroundLabel = SKPlusCaption(@"");
++
++    // --- Tooltips ---
++    toolTipModePopUp = [[NSPopUpButton alloc] init];
++    [toolTipModePopUp addItemsWithTitles:@[NSLocalizedString(@"Default (1.5 s)", @"Popup item"),
++                                           NSLocalizedString(@"After custom delay", @"Popup item"),
++                                           NSLocalizedString(@"Never", @"Popup item")]];
++    [toolTipModePopUp setTarget:self];
++    [toolTipModePopUp setAction:@selector(changeToolTipMode:)];
++    toolTipDelayField = [NSTextField textFieldWithString:@""];
++    [toolTipDelayField setPlaceholderString:@"seconds"];
++    [[toolTipDelayField widthAnchor] constraintEqualToConstant:70.0].active = YES;
++    [toolTipDelayField setTarget:self];
++    [toolTipDelayField setAction:@selector(changeToolTipDelay:)];
++    toolTipAutoHideField = [NSTextField textFieldWithString:@""];
++    [toolTipAutoHideField setPlaceholderString:@"10"];
++    [[toolTipAutoHideField widthAnchor] constraintEqualToConstant:70.0].active = YES;
++    [toolTipAutoHideField setTarget:self];
++    [toolTipAutoHideField setAction:@selector(changeToolTipAutoHide:)];
++
++    // --- Stock hidden preferences ---
++    darkBackgroundWell = [[NSColorWell alloc] init];
++    [darkBackgroundWell setTarget:self];
++    [darkBackgroundWell setAction:@selector(changeDarkBackground:)];
++    darkFullScreenBackgroundWell = [[NSColorWell alloc] init];
++    [darkFullScreenBackgroundWell setTarget:self];
++    [darkFullScreenBackgroundWell setAction:@selector(changeDarkFullScreenBackground:)];
++    NSButton *resetDark = [NSButton buttonWithTitle:NSLocalizedString(@"Stock", @"Button title") target:self action:@selector(resetDarkBackground:)];
++    NSButton *resetDarkFS = [NSButton buttonWithTitle:NSLocalizedString(@"Stock", @"Button title") target:self action:@selector(resetDarkFullScreenBackground:)];
++    [resetDark setControlSize:NSControlSizeSmall];
++    [resetDarkFS setControlSize:NSControlSizeSmall];
++    for (NSColorWell *well in @[darkBackgroundWell, darkFullScreenBackgroundWell]) {
++        [[well widthAnchor] constraintEqualToConstant:44.0].active = YES;
++        [[well heightAnchor] constraintEqualToConstant:23.0].active = YES;
++    }
++    sequentialNumberingCheckbox = [NSButton checkboxWithTitle:NSLocalizedString(@"Use sequential page numbering", @"Checkbox title")
++                                                       target:self action:@selector(changeSequentialNumbering:)];
++
++    NSStackView *darkWellRow = [NSStackView stackViewWithViews:@[darkBackgroundWell, resetDark]];
++    NSStackView *darkFSWellRow = [NSStackView stackViewWithViews:@[darkFullScreenBackgroundWell, resetDarkFS]];
++
++    NSGridView *darkGrid = [NSGridView gridViewWithViews:@[
++        @[SKPlusLabel(NSLocalizedString(@"Inverted page background:", @"")), invertBackgroundCheckbox],
++        @[[NSGridCell emptyContentView], invertBackgroundSlider],
++        @[[NSGridCell emptyContentView], invertBackgroundLabel],
++        @[SKPlusLabel(NSLocalizedString(@"Window background:", @"")), darkWellRow],
++        @[SKPlusLabel(NSLocalizedString(@"Full screen background:", @"")), darkFSWellRow],
++    ]];
++    NSGridView *tooltipGrid = [NSGridView gridViewWithViews:@[
++        @[SKPlusLabel(NSLocalizedString(@"Show tooltips:", @"")), toolTipModePopUp],
++        @[SKPlusLabel(NSLocalizedString(@"Delay:", @"")), toolTipDelayField],
++        @[SKPlusLabel(NSLocalizedString(@"Auto-hide after:", @"")), toolTipAutoHideField],
++    ]];
++    NSGridView *pagesGrid = [NSGridView gridViewWithViews:@[
++        @[SKPlusLabel(NSLocalizedString(@"Page numbering:", @"")), sequentialNumberingCheckbox],
++    ]];
++
++    NSMutableArray *sections = [NSMutableArray array];
++    [sections addObject:SKPlusHeader(NSLocalizedString(@"Dark Mode", @"Section header"))];
++    [sections addObject:darkGrid];
++    [sections addObject:SKPlusSeparator()];
++    [sections addObject:SKPlusHeader(NSLocalizedString(@"Tooltips", @"Section header"))];
++    [sections addObject:tooltipGrid];
++    [sections addObject:SKPlusSeparator()];
++    [sections addObject:SKPlusHeader(NSLocalizedString(@"Pages", @"Section header"))];
++    [sections addObject:pagesGrid];
++
++    for (NSGridView *grid in @[darkGrid, tooltipGrid, pagesGrid]) {
++        [grid setRowSpacing:8.0];
++        [grid setColumnSpacing:8.0];
++        [[grid columnAtIndex:0] setXPlacement:NSGridCellPlacementTrailing];
++        // shared label column width so the three grids align as one form
++        [[grid columnAtIndex:0] setWidth:180.0];
++    }
++
++    NSTextField *footer = SKPlusCaption(NSLocalizedString(@"Skim+ additions. Anything left at its stock setting behaves exactly like stock Skim.", @"Caption"));
++
++    NSStackView *stack = [NSStackView stackViewWithViews:[sections arrayByAddingObject:footer]];
++    [stack setOrientation:NSUserInterfaceLayoutOrientationVertical];
++    [stack setAlignment:NSLayoutAttributeLeading];
++    [stack setSpacing:16.0];
++    // separators have no intrinsic width; span them across the content
++    for (NSView *v in sections) {
++        if ([v isKindOfClass:[NSBox class]])
++            [[[v widthAnchor] constraintEqualToAnchor:[stack widthAnchor] constant:-40.0] setActive:YES];
++    }
++    // Bottom inset clears the preference window's Reset/Reset All strip: the
++    // controller bottom-aligns the pane view, so the pane itself must carry
++    // the clearance the nib-based panes bake into their layouts.
++    [stack setEdgeInsets:NSEdgeInsetsMake(20.0, 20.0, 48.0, 20.0)];
++
++    NSView *view = [[NSView alloc] init];
++    [view addSubview:stack];
++    [stack setTranslatesAutoresizingMaskIntoConstraints:NO];
++    [NSLayoutConstraint activateConstraints:@[
++        [[stack topAnchor] constraintEqualToAnchor:[view topAnchor]],
++        [[stack leadingAnchor] constraintEqualToAnchor:[view leadingAnchor]],
++        [[stack trailingAnchor] constraintLessThanOrEqualToAnchor:[view trailingAnchor]],
++        [[stack bottomAnchor] constraintEqualToAnchor:[view bottomAnchor]],
++    ]];
++    [self setView:view];
++
++    [self updateControlsFromDefaults];
++    (void)sud;
++}
++
++#pragma mark State
++
++- (void)updateControlsFromDefaults {
++    updatingControls = YES;
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++
++    NSNumber *gray = [sud objectForKey:SKInvertedDarkModeBackgroundGrayKey];
++    [invertBackgroundCheckbox setState:gray ? NSControlStateValueOn : NSControlStateValueOff];
++    [invertBackgroundSlider setEnabled:gray != nil];
++    [invertBackgroundSlider setDoubleValue:gray ? [gray doubleValue] : UPSTREAM_INVERT_GRAY];
++    [self updateInvertLabel];
++
++    double delay = [sud doubleForKey:SKToolTipDelayKey];
++    if ([sud objectForKey:SKToolTipDelayKey] == nil || delay == 0.0) {
++        [toolTipModePopUp selectItemAtIndex:SKToolTipModeDefault];
++        [toolTipDelayField setStringValue:@""];
++        [toolTipDelayField setEnabled:NO];
++    } else if (delay < 0.0) {
++        [toolTipModePopUp selectItemAtIndex:SKToolTipModeNever];
++        [toolTipDelayField setStringValue:@""];
++        [toolTipDelayField setEnabled:NO];
++    } else {
++        [toolTipModePopUp selectItemAtIndex:SKToolTipModeCustom];
++        [toolTipDelayField setDoubleValue:delay];
++        [toolTipDelayField setEnabled:YES];
++    }
++
++    if ([sud objectForKey:SKToolTipAutoHideTimeKey])
++        [toolTipAutoHideField setDoubleValue:[sud doubleForKey:SKToolTipAutoHideTimeKey]];
++    else
++        [toolTipAutoHideField setStringValue:@""];
++
++    // WYSIWYG: while inverted dark mode renders, the wells show the color as
++    // seen on screen (the stored value passed through the invert filter).
++    NSColor *fallback = [NSColor colorWithGenericGamma22White:0.17 alpha:1.0];
++    NSColor *bg = [sud colorForKey:SKDarkBackgroundColorKey] ?: fallback;
++    NSColor *bgFS = [sud colorForKey:SKDarkFullScreenBackgroundColorKey] ?: fallback;
++    if (SKPlusInvertRenderingActive()) {
++        // stored = the color the user wants to SEE; the render path
++        // pre-compensates. Snap the swatch to the filter's achievable gamut
++        // so out-of-gamut picks show what will actually render.
++        double f = SKPlusCurrentInvertF();
++        bg = SKPlusRenderedColor(SKPlusPreInvertedColor(bg, f), f);
++        bgFS = SKPlusRenderedColor(SKPlusPreInvertedColor(bgFS, f), f);
++    }
++    // Never programmatically set an ACTIVE well: it echoes through the shared
++    // color panel asynchronously (after any reentrancy flag has reset) and
++    // comes back as a user action that lossily re-stores the snapped color.
++    if ([darkBackgroundWell isActive] == NO)
++        [darkBackgroundWell setColor:bg];
++    if ([darkFullScreenBackgroundWell isActive] == NO)
++        [darkFullScreenBackgroundWell setColor:bgFS];
++
++    [sequentialNumberingCheckbox setState:[sud boolForKey:SKSequentialPageNumberingKey] ? NSControlStateValueOn : NSControlStateValueOff];
++    updatingControls = NO;
++}
++
++- (void)updateInvertLabel {
++    if ([invertBackgroundSlider isEnabled] == NO) {
++        [invertBackgroundLabel setStringValue:NSLocalizedString(@"Stock: dark gray (45/255)", @"Caption")];
++    } else {
++        double v = [invertBackgroundSlider doubleValue];
++        [invertBackgroundLabel setStringValue:v == 0.0
++            ? NSLocalizedString(@"True black — best for OLED and outdoor reading", @"Caption")
++            : [NSString stringWithFormat:NSLocalizedString(@"Gray level %.0f/255", @"Caption"), v * 255.0]];
++    }
++}
++
++#pragma mark Actions
++
++- (void)changeInvertBackground:(id)sender {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++    if ([invertBackgroundCheckbox state] == NSControlStateValueOn) {
++        [invertBackgroundSlider setEnabled:YES];
++        [sud setDouble:[invertBackgroundSlider doubleValue] forKey:SKInvertedDarkModeBackgroundGrayKey];
++    } else {
++        [invertBackgroundSlider setEnabled:NO];
++        [sud removeObjectForKey:SKInvertedDarkModeBackgroundGrayKey];
++    }
++    // f changed, so the rendered appearance of the background wells changed too
++    [self updateControlsFromDefaults];
++}
++
++- (void)changeToolTipMode:(id)sender {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++    switch ([toolTipModePopUp indexOfSelectedItem]) {
++        case SKToolTipModeDefault:
++            [sud removeObjectForKey:SKToolTipDelayKey];
++            break;
++        case SKToolTipModeNever:
++            [sud setDouble:-1.0 forKey:SKToolTipDelayKey];
++            break;
++        case SKToolTipModeCustom:
++            [sud setDouble:[toolTipDelayField doubleValue] > 0.0 ? [toolTipDelayField doubleValue] : UPSTREAM_TOOLTIP_DELAY forKey:SKToolTipDelayKey];
++            break;
++    }
++    [self updateControlsFromDefaults];
++}
++
++- (void)changeToolTipDelay:(id)sender {
++    if ([toolTipDelayField doubleValue] > 0.0)
++        [[NSUserDefaults standardUserDefaults] setDouble:[toolTipDelayField doubleValue] forKey:SKToolTipDelayKey];
++}
++
++- (void)changeToolTipAutoHide:(id)sender {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++    if ([[toolTipAutoHideField stringValue] length] == 0 || [toolTipAutoHideField doubleValue] <= 0.0)
++        [sud removeObjectForKey:SKToolTipAutoHideTimeKey];
++    else
++        [sud setDouble:[toolTipAutoHideField doubleValue] forKey:SKToolTipAutoHideTimeKey];
++}
++
++- (void)changeDarkBackground:(id)sender {
++    // Ignore echoes of our own programmatic setColor: bounced back via the
++    // shared color panel — storing those would lossily overwrite the desired
++    // color with its gamut-snapped display value (tint destroyed at f=2).
++    if (updatingControls) return;
++    [[NSUserDefaults standardUserDefaults] setColor:[darkBackgroundWell color] forKey:SKDarkBackgroundColorKey];
++}
++
++- (void)changeDarkFullScreenBackground:(id)sender {
++    if (updatingControls) return;
++    [[NSUserDefaults standardUserDefaults] setColor:[darkFullScreenBackgroundWell color] forKey:SKDarkFullScreenBackgroundColorKey];
++}
++
++- (void)resetDarkBackground:(id)sender {
++    [[NSUserDefaults standardUserDefaults] removeObjectForKey:SKDarkBackgroundColorKey];
++    [self updateControlsFromDefaults];
++}
++
++- (void)resetDarkFullScreenBackground:(id)sender {
++    [[NSUserDefaults standardUserDefaults] removeObjectForKey:SKDarkFullScreenBackgroundColorKey];
++    [self updateControlsFromDefaults];
++}
++
++- (void)changeSequentialNumbering:(id)sender {
++    [[NSUserDefaults standardUserDefaults] setBool:[sequentialNumberingCheckbox state] == NSControlStateValueOn forKey:SKSequentialPageNumberingKey];
++}
++
++#pragma mark SKPreferencePane
++
++- (void)defaultsDidRevert {
++    if ([self isViewLoaded])
++        [self updateControlsFromDefaults];
++}
++
++@end
+--- SKPreferenceController.m
++++ SKPreferenceController.m
+@@ -41,6 +41,7 @@
+ #import "SKDisplayPreferences.h"
+ #import "SKNotesPreferences.h"
+ #import "SKSyncPreferences.h"
++#import "SKPlusPreferences.h"
+ #import "NSUserDefaultsController_SKExtensions.h"
+ #import "SKFontWell.h"
+ #import "SKFieldEditor.h"
+@@ -78,7 +79,8 @@
+                 [[SKGeneralPreferences alloc] init], 
+                 [[SKDisplayPreferences alloc] init], 
+                 [[SKNotesPreferences alloc] init], 
+-                [[SKSyncPreferences alloc] init], nil];
++                [[SKSyncPreferences alloc] init],
++                [[SKPlusPreferences alloc] init], nil];
+         history = [[NSMutableArray alloc] init];
+         historyIndex = 0;
+     }
+@@ -163,6 +165,10 @@
+     [toolbar setVisible:YES];
+     [toolbar setDelegate:self];
+     [window setToolbar:toolbar];
++    // Skim+: preference toolbar style (title above the item strip) so all five
++    // pane items fit the strip instead of the fifth landing in overflow.
++    if (@available(macOS 11.0, *))
++        [window setToolbarStyle:NSWindowToolbarStylePreference];
+     
+     if (@available(macOS 11.0, *)) {
+         if ([[[NSLocale currentLocale] languageCode] isEqualToString:@"pl"])
+--- Skim.xcodeproj/project.pbxproj
++++ Skim.xcodeproj/project.pbxproj
+@@ -326,6 +326,7 @@
+ 		CEF60F2F114C54090074ACC4 /* SKNotesPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF60F2E114C54090074ACC4 /* SKNotesPreferences.m */; };
+ 		CEF60F32114C54360074ACC4 /* SKSyncPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */; };
+ 		AB5C1B0001000000000000B3 /* SKPlusInvertMath.m in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */; };
++		AB5C1B0001000000000000A3 /* SKPlusPreferences.m in Sources */ = {isa = PBXBuildFile; fileRef = AB5C1B0001000000000000A2 /* SKPlusPreferences.m */; };
+ 		CEF64E361160CBAC001C10C8 /* MainToolbar.xib in Resources */ = {isa = PBXBuildFile; fileRef = CEF64E351160CBAC001C10C8 /* MainToolbar.xib */; };
+ 		CEF7117F0B90B58F003A2771 /* SKVersionNumber.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF7117D0B90B58E003A2771 /* SKVersionNumber.m */; };
+ 		CEF711A10B90B714003A2771 /* NSUserDefaultsController_SKExtensions.m in Sources */ = {isa = PBXBuildFile; fileRef = CEF711A00B90B714003A2771 /* NSUserDefaultsController_SKExtensions.m */; };
+@@ -1451,6 +1452,8 @@
+ 		CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKSyncPreferences.m; sourceTree = "<group>"; };
+ 		AB5C1B0001000000000000B1 /* SKPlusInvertMath.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SKPlusInvertMath.h; sourceTree = "<group>"; };
+ 		AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKPlusInvertMath.m; sourceTree = "<group>"; };
++		AB5C1B0001000000000000A1 /* SKPlusPreferences.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SKPlusPreferences.h; sourceTree = "<group>"; };
++		AB5C1B0001000000000000A2 /* SKPlusPreferences.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SKPlusPreferences.m; sourceTree = "<group>"; };
+ 		CEF64E351160CBAC001C10C8 /* MainToolbar.xib */ = {isa = PBXFileReference; lastKnownFileType = file.xib; path = MainToolbar.xib; sourceTree = "<group>"; };
+ 		CEF7117C0B90B58E003A2771 /* SKVersionNumber.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = SKVersionNumber.h; sourceTree = "<group>"; };
+ 		CEF7117D0B90B58E003A2771 /* SKVersionNumber.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SKVersionNumber.m; sourceTree = "<group>"; };
+@@ -1924,6 +1927,8 @@
+ 				CEF60F31114C54360074ACC4 /* SKSyncPreferences.m */,
+ 				AB5C1B0001000000000000B1 /* SKPlusInvertMath.h */,
+ 				AB5C1B0001000000000000B2 /* SKPlusInvertMath.m */,
++				AB5C1B0001000000000000A1 /* SKPlusPreferences.h */,
++				AB5C1B0001000000000000A2 /* SKPlusPreferences.m */,
+ 			);
+ 			name = Controllers;
+ 			sourceTree = "<group>";
+@@ -3214,6 +3219,7 @@
+ 				CEF60F2F114C54090074ACC4 /* SKNotesPreferences.m in Sources */,
+ 				CEF60F32114C54360074ACC4 /* SKSyncPreferences.m in Sources */,
+ 				AB5C1B0001000000000000B3 /* SKPlusInvertMath.m in Sources */,
++				AB5C1B0001000000000000A3 /* SKPlusPreferences.m in Sources */,
+ 				CE0E8651114DBF7000E37F38 /* SKStaticToolbarWindow.m in Sources */,
+ 				CE8388BC115BC61F00DB1AD7 /* SKNoteTypeSheetController.m in Sources */,
+ 				CE8BEFE3115F75590029020F /* SKSideViewController.m in Sources */,
