@@ -1,0 +1,33 @@
+Hidden pref for the inverted-dark-mode page background level (declined upstream as scope):
+  https://sourceforge.net/p/skim-app/feature-requests/1774/  (custom bg color)
+  https://sourceforge.net/p/skim-app/feature-requests/1722/  (darker dark mode)
+  https://sourceforge.net/p/skim-app/feature-requests/1776/  (true black)
+
+defaults write net.sourceforge.skim-app.skim SKInvertedDarkModeBackgroundGray -float 0    # true black
+Unset = upstream behavior (45/255 gray, 30/255 with Increase Contrast).
+
+--- NSGraphics_SKExtensions.m
++++ NSGraphics_SKExtensions.m
+@@ -200,7 +200,21 @@
+     }
+     if (SKHasDarkAppearance() && [sud boolForKey:SKInvertColorsInDarkModeKey]) {
+         // map the white page background to 45/255, or 30/255 with high contrast
+-        CGFloat f = [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972;
++        // Skim+: optional hidden pref for the inverted page background level
++        // (upstream #1774, #1722, #1776). sRGB gray 0.0 (true black) - 1.0;
++        // unset = upstream defaults (45/255, or 30/255 with Increase Contrast).
++        // Inverting the gamma/matrix chain gives f = 2 - toLinear(gray)^(1/1.6),
++        // which reproduces upstream's constants exactly (0.17647 -> 1.8972,
++        // 0.11765 -> 1.9338).
++        CGFloat f;
++        NSNumber *bgGray = [[NSUserDefaults standardUserDefaults] objectForKey:@"SKInvertedDarkModeBackgroundGray"];
++        if (bgGray) {
++            CGFloat gray = fmin(fmax([bgGray doubleValue], 0.0), 1.0);
++            CGFloat linear = gray <= 0.04045 ? gray / 12.92 : pow((gray + 0.055) / 1.055, 2.4);
++            f = 2.0 - pow(linear, 0.625);
++        } else {
++            f = [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972;
++        }
+         CGFloat lrf = LR * f, lgf = LG * f, lbf = LB * f;
+         // This is like CIColorInvert + CIHueAdjust, modified to map white to dark gray rather than black
+         // Inverts a linear luminocity with weights from the CIE standards

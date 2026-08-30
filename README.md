@@ -4,11 +4,15 @@ A small, automated patch set on top of [Skim](https://skim-app.sourceforge.io/),
 
 **Unaffiliated with the Skim project.** Please do not report bugs in these builds to the Skim maintainers; file them [here](../../issues) instead. This repository is maintained largely by automation (an AI agent watches upstream releases, rebuilds, and files issues when human attention is needed), with a human owner reviewing anything the automation flags.
 
+## The rule
+
+**Skim+ never changes default behavior.** Every patch only *exposes an option* — a hidden preference or a menu item — and with nothing set, a Skim+ build behaves bit-for-bit like stock Skim. There is no danger in switching builds. (Someone can do a skim++ if they want to introduce new default behaviors.)
+
 ## Patches
 
 | Patch | What it does | Upstream status |
 |---|---|---|
-| `0001-true-black-dark-mode-invert.patch` | "Invert colors in dark mode" maps white paper to true black (`#000`) instead of the hard-coded 45/255 gray. For OLED/mini-LED reading at high brightness. | Declined: [#1774](https://sourceforge.net/p/skim-app/feature-requests/1774/), [#1722](https://sourceforge.net/p/skim-app/feature-requests/1722/), [#1776](https://sourceforge.net/p/skim-app/feature-requests/1776/) |
+| `0001-inverted-dark-mode-background-pref.patch` | Hidden pref `SKInvertedDarkModeBackgroundGray` (sRGB 0.0–1.0): the page-background level used by "invert colors in dark mode". `0` = true black for OLED/mini-LED reading. Unset = upstream's 45/255 gray. | Declined: [#1774](https://sourceforge.net/p/skim-app/feature-requests/1774/), [#1722](https://sourceforge.net/p/skim-app/feature-requests/1722/), [#1776](https://sourceforge.net/p/skim-app/feature-requests/1776/) |
 | `0002-tooltip-timing-prefs.patch` | Hidden prefs for tooltip timing: `SKToolTipDelay` (seconds; negative disables tooltips) and `SKToolTipAutoHideTime`. Unset = upstream behavior. | Declined: [#1757](https://sourceforge.net/p/skim-app/feature-requests/1757/), [#1312](https://sourceforge.net/p/skim-app/feature-requests/1312/), [#1325](https://sourceforge.net/p/skim-app/feature-requests/1325/) |
 | `0003-invert-dark-mode-menu-toggle.patch` | View-menu item (with checkmark) toggling "Invert Colors in Dark Mode" live — bindable to a keyboard shortcut via System Settings. | Declined: [#1659](https://sourceforge.net/p/skim-app/feature-requests/1659/) |
 
