@@ -1,0 +1,360 @@
+Hidden pref for the color originally black text lands on in inverted dark mode
+(declined upstream as scope: https://sourceforge.net/p/skim-app/feature-requests/1777/).
+Builds on 0001 (background level) and 0004 (SKPlusInvertMath): the filter's factor
+and bias become per channel, so the text end can take a tint. Unset = upstream's
+pure white, bit for bit.
+
+defaults write net.sourceforge.skim-app.skim SKInvertedDarkModeTextColor -float 0.72   # light gray text
+Or pick a color in Preferences > Advanced.
+
+--- NSGraphics_SKExtensions.m
++++ NSGraphics_SKExtensions.m
+@@ -37,6 +37,7 @@
+  */
+ 
+ #import "NSGraphics_SKExtensions.h"
++#import "SKPlusInvertMath.h"
+ #import "NSGeometry_SKExtensions.h"
+ #import "NSColor_SKExtensions.h"
+ #import "NSUserDefaults_SKExtensions.h"
+@@ -199,29 +200,16 @@
+             [filters addObject:filter];
+     }
+     if (SKHasDarkAppearance() && [sud boolForKey:SKInvertColorsInDarkModeKey]) {
+-        // map the white page background to 45/255, or 30/255 with high contrast
+-        // Skim+: optional hidden pref for the inverted page background level
+-        // (upstream #1774, #1722, #1776). sRGB gray 0.0 (true black) - 1.0;
+-        // unset = upstream defaults (45/255, or 30/255 with Increase Contrast).
+-        // Inverting the gamma/matrix chain gives f = 2 - toLinear(gray)^(1/1.6),
+-        // which reproduces upstream's constants exactly (0.17647 -> 1.8972,
+-        // 0.11765 -> 1.9338).
+-        CGFloat f;
+-        NSNumber *bgGray = [[NSUserDefaults standardUserDefaults] objectForKey:@"SKInvertedDarkModeBackgroundGray"];
+-        if (bgGray) {
+-            CGFloat gray = fmin(fmax([bgGray doubleValue], 0.0), 1.0);
+-            CGFloat linear = gray <= 0.04045 ? gray / 12.92 : pow((gray + 0.055) / 1.055, 2.4);
+-            f = 2.0 - pow(linear, 0.625);
+-        } else {
+-            f = [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972;
+-        }
+-        CGFloat lrf = LR * f, lgf = LG * f, lbf = LB * f;
++        // Skim+: per-channel factor and bias from the hidden background level
++        // (0001) and text color (0006) preferences; unset = upstream's constants.
++        // The math lives in SKPlusInvertMath.m, next to its inverse.
++        SKPlusInvertParams p = SKPlusCurrentInvertParams();
+         // This is like CIColorInvert + CIHueAdjust, modified to map white to dark gray rather than black
+         // Inverts a linear luminocity with weights from the CIE standards
+         // see https://wiki.preterhuman.net/Matrix_Operations_for_Image_Processingand https://beesbuzz.biz/code/16-hsv-color-transforms
+         if ((filter = [CIFilter filterWithName:@"CIGammaAdjust" keysAndValues:@"inputPower", @0.625, nil]))
+             [filters addObject:filter];
+-        if ((filter = [CIFilter filterWithName:@"CIColorMatrix" keysAndValues:@"inputRVector", [CIVector vectorWithX:1.0-lrf Y:-lgf Z:-lbf W:0.0], @"inputGVector", [CIVector vectorWithX:-lrf Y:1.0-lgf Z:-lbf W:0.0], @"inputBVector", [CIVector vectorWithX:-lrf Y:-lgf Z:1.0-lbf W:0.0], @"inputAVector", [CIVector vectorWithX:0.0 Y:0.0 Z:0.0 W:1.0], @"inputBiasVector", [CIVector vectorWithX:1.0 Y:1.0 Z:1.0 W:0.0], nil]))
++        if ((filter = [CIFilter filterWithName:@"CIColorMatrix" keysAndValues:@"inputRVector", [CIVector vectorWithX:1.0-LR*p.f[0] Y:-LG*p.f[0] Z:-LB*p.f[0] W:0.0], @"inputGVector", [CIVector vectorWithX:-LR*p.f[1] Y:1.0-LG*p.f[1] Z:-LB*p.f[1] W:0.0], @"inputBVector", [CIVector vectorWithX:-LR*p.f[2] Y:-LG*p.f[2] Z:1.0-LB*p.f[2] W:0.0], @"inputAVector", [CIVector vectorWithX:0.0 Y:0.0 Z:0.0 W:1.0], @"inputBiasVector", [CIVector vectorWithX:p.b[0] Y:p.b[1] Z:p.b[2] W:0.0], nil]))
+             [filters addObject:filter];
+         if ((filter = [CIFilter filterWithName:@"CIGammaAdjust" keysAndValues:@"inputPower", @1.6, nil]))
+             [filters addObject:filter];
+
+--- PDFView_SKExtensions.m
++++ PDFView_SKExtensions.m
+@@ -339,7 +339,7 @@
+         // inverted-dark-mode filter will process this background, pre-compensate
+         // so the filter renders the stored color literally (upstream #1774).
+         if (color && SKPlusInvertRenderingActive())
+-            color = SKPlusPreInvertedColor(color, SKPlusCurrentInvertF());
++            color = SKPlusPreInvertedColor(color, SKPlusCurrentInvertParams());
+     }
+     if (color == nil)
+         color = [[NSUserDefaults standardUserDefaults] colorForKey:backgroundColorKey];
+
+--- SKBasePDFView.m
++++ SKBasePDFView.m
+@@ -74,7 +74,7 @@
+ static inline NSArray *defaultKeysToObserve() {
+     if (@available(macOS 10.14, *))
+         // Skim+: also rebuild filters when the inverted-background level changes
+-        return @[SKInvertColorsInDarkModeKey, SKSepiaToneKey, SKWhitePointKey, SKInvertedDarkModeBackgroundGrayKey];
++        return @[SKInvertColorsInDarkModeKey, SKSepiaToneKey, SKWhitePointKey, SKInvertedDarkModeBackgroundGrayKey, SKInvertedDarkModeTextColorKey];
+     else
+         return @[SKSepiaToneKey, SKWhitePointKey];
+ }
+
+--- SKMainWindowController.m
++++ SKMainWindowController.m
+@@ -2541,7 +2541,7 @@
+     for (NSString *key in @[SKBackgroundColorKey, SKFullScreenBackgroundColorKey,
+                             SKDarkBackgroundColorKey, SKDarkFullScreenBackgroundColorKey,
+                             // Skim+: background pre-compensation depends on these
+-                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey,
++                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey, SKInvertedDarkModeTextColorKey,
+                             SKThumbnailSizeKey, SKSnapshotThumbnailSizeKey,
+                             SKInterpolationQualityKey,
+                             SKTableFontSizeKey])
+@@ -2559,7 +2559,7 @@
+     for (NSString *key in @[SKBackgroundColorKey, SKFullScreenBackgroundColorKey,
+                             SKDarkBackgroundColorKey, SKDarkFullScreenBackgroundColorKey,
+                             // Skim+: background pre-compensation depends on these
+-                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey,
++                            SKInvertColorsInDarkModeKey, SKInvertedDarkModeBackgroundGrayKey, SKInvertedDarkModeTextColorKey,
+                             SKThumbnailSizeKey, SKSnapshotThumbnailSizeKey,
+                             SKInterpolationQualityKey,
+                             SKTableFontSizeKey]) {
+@@ -2641,7 +2641,8 @@
+         
+         // A default value that we are observing has changed
+         if ([keyPath isEqualToString:SKBackgroundColorKey] || [keyPath isEqualToString:SKDarkBackgroundColorKey] ||
+-            [keyPath isEqualToString:SKInvertColorsInDarkModeKey] || [keyPath isEqualToString:SKInvertedDarkModeBackgroundGrayKey]) {
++            [keyPath isEqualToString:SKInvertColorsInDarkModeKey] || [keyPath isEqualToString:SKInvertedDarkModeBackgroundGrayKey] ||
++            [keyPath isEqualToString:SKInvertedDarkModeTextColorKey]) {
+             NSColor *backgroundColor = nil;
+             if (interactionMode == SKNormalMode)
+                 backgroundColor = [PDFView defaultBackgroundColor];
+
+--- SKPlusInvertMath.h
++++ SKPlusInvertMath.h
+@@ -15,17 +15,28 @@
+ NS_ASSUME_NONNULL_BEGIN
+ 
+ #define SKInvertedDarkModeBackgroundGrayKey @"SKInvertedDarkModeBackgroundGray"
++#define SKInvertedDarkModeTextColorKey @"SKInvertedDarkModeTextColor"
+ 
+-// The strength factor f the invert filter is currently using
+-extern double SKPlusCurrentInvertF(void);
++// Per-channel parameters of the invert filter, in its intermediate space:
++// originally white lands on 1 - f + b, originally black lands on b.
++typedef struct {
++    double f[3];
++    double b[3];
++} SKPlusInvertParams;
+ 
++// The parameters the invert filter is currently using
++extern SKPlusInvertParams SKPlusCurrentInvertParams(void);
++
+ // YES when content is being rendered through the invert filter
+ extern BOOL SKPlusInvertRenderingActive(void);
+ 
+-// Forward transform: what `color` looks like after the invert filter at strength f
+-extern NSColor *SKPlusRenderedColor(NSColor *color, double f);
++// The sRGB color originally black content lands on (white unless a text color is set)
++extern NSColor *SKPlusInvertedTextColor(SKPlusInvertParams p);
+ 
++// Forward transform: what `color` looks like after the invert filter
++extern NSColor *SKPlusRenderedColor(NSColor *color, SKPlusInvertParams p);
++
+ // Inverse transform: the color to FEED the filter so it renders `desired`
+-extern NSColor *SKPlusPreInvertedColor(NSColor *desired, double f);
++extern NSColor *SKPlusPreInvertedColor(NSColor *desired, SKPlusInvertParams p);
+ 
+ NS_ASSUME_NONNULL_END
+
+--- SKPlusInvertMath.m
++++ SKPlusInvertMath.m
+@@ -9,6 +9,7 @@
+ 
+ #import "SKPlusInvertMath.h"
+ #import "SKStringConstants.h"
++#import "NSUserDefaults_SKExtensions.h"
+ #import "NSGraphics_SKExtensions.h"
+ 
+ #define LUM_R 0.2126
+@@ -19,44 +20,79 @@
+ static double fromLinear(double c) { return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055; }
+ static double clamp01(double c) { return fmin(fmax(c, 0.0), 1.0); }
+ 
+-double SKPlusCurrentInvertF(void) {
++// The intermediate-space level a white page lands on: the hidden background
++// level (0001), else upstream's constants as 2 - f.
++static double backgroundLevel(void) {
+     NSNumber *bgGray = [[NSUserDefaults standardUserDefaults] objectForKey:SKInvertedDarkModeBackgroundGrayKey];
+-    if (bgGray) {
+-        double gray = clamp01([bgGray doubleValue]);
+-        return 2.0 - pow(toLinear(gray), 0.625);
++    if (bgGray)
++        return pow(toLinear(clamp01([bgGray doubleValue])), 0.625);
++    return 2.0 - ([[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972);
++}
++
++// The level originally black content lands on, per channel: white unless
++// SKInvertedDarkModeTextColor is set. The key takes an archived color
++// (Preferences > Advanced) or a plain gray level 0.0-1.0 (`defaults write -float`).
++static void textLevels(double b[3]) {
++    NSUserDefaults *sud = [NSUserDefaults standardUserDefaults];
++    id value = [sud objectForKey:SKInvertedDarkModeTextColorKey];
++    NSColor *color = nil;
++    if ([value isKindOfClass:[NSNumber class]]) {
++        double gray = clamp01([value doubleValue]);
++        color = [NSColor colorWithSRGBRed:gray green:gray blue:gray alpha:1.0];
++    } else if ([value isKindOfClass:[NSData class]]) {
++        color = [[sud colorForKey:SKInvertedDarkModeTextColorKey] colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+     }
+-    return [[NSWorkspace sharedWorkspace] accessibilityDisplayShouldIncreaseContrast] ? 1.9338 : 1.8972;
++    if (color == nil) {
++        b[0] = b[1] = b[2] = 1.0;
++        return;
++    }
++    b[0] = pow(toLinear(clamp01([color redComponent])), 0.625);
++    b[1] = pow(toLinear(clamp01([color greenComponent])), 0.625);
++    b[2] = pow(toLinear(clamp01([color blueComponent])), 0.625);
+ }
+ 
++SKPlusInvertParams SKPlusCurrentInvertParams(void) {
++    // Per channel, white lands on B and black on b, so f = 1 + b - B. With no
++    // text color b = 1 and f = 2 - B: 0001's formula, and upstream's constants.
++    SKPlusInvertParams p;
++    double B = backgroundLevel();
++    textLevels(p.b);
++    for (int i = 0; i < 3; i++)
++        p.f[i] = 1.0 + p.b[i] - B;
++    return p;
++}
++
+ BOOL SKPlusInvertRenderingActive(void) {
+     return SKHasDarkAppearance() && [[NSUserDefaults standardUserDefaults] boolForKey:SKInvertColorsInDarkModeKey];
+ }
+ 
+-NSColor *SKPlusRenderedColor(NSColor *color, double f) {
++NSColor *SKPlusInvertedTextColor(SKPlusInvertParams p) {
++    return [NSColor colorWithSRGBRed:fromLinear(pow(p.b[0], 1.6)) green:fromLinear(pow(p.b[1], 1.6)) blue:fromLinear(pow(p.b[2], 1.6)) alpha:1.0];
++}
++
++NSColor *SKPlusRenderedColor(NSColor *color, SKPlusInvertParams p) {
+     NSColor *c = [color colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+-    double r = pow(toLinear([c redComponent]), 0.625);
+-    double g = pow(toLinear([c greenComponent]), 0.625);
+-    double b = pow(toLinear([c blueComponent]), 0.625);
+-    double L = LUM_R * r + LUM_G * g + LUM_B * b;
+-    double outR = pow(clamp01(r - f * L + 1.0), 1.6);
+-    double outG = pow(clamp01(g - f * L + 1.0), 1.6);
+-    double outB = pow(clamp01(b - f * L + 1.0), 1.6);
+-    return [NSColor colorWithSRGBRed:fromLinear(outR) green:fromLinear(outG) blue:fromLinear(outB) alpha:1.0];
++    double in[3] = { pow(toLinear([c redComponent]), 0.625), pow(toLinear([c greenComponent]), 0.625), pow(toLinear([c blueComponent]), 0.625) };
++    double L = LUM_R * in[0] + LUM_G * in[1] + LUM_B * in[2];
++    double out[3];
++    for (int i = 0; i < 3; i++)
++        out[i] = fromLinear(pow(clamp01(in[i] - p.f[i] * L + p.b[i]), 1.6));
++    return [NSColor colorWithSRGBRed:out[0] green:out[1] blue:out[2] alpha:1.0];
+ }
+ 
+-NSColor *SKPlusPreInvertedColor(NSColor *desired, double f) {
+-    if (f <= 1.0001)
++NSColor *SKPlusPreInvertedColor(NSColor *desired, SKPlusInvertParams p) {
++    // luminance-weighted factor; for a scalar f this is f itself
++    double wf = LUM_R * p.f[0] + LUM_G * p.f[1] + LUM_B * p.f[2];
++    if (wf <= 1.0001)
+         return desired; // degenerate filter; identity is the least-wrong answer
+     NSColor *d = [desired colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+-    // From out = (c - f*L + 1)^1.6: t = out^(1/1.6); luminance of both sides
+-    // gives L = (1 - Lt) / (f - 1); then c = t + f*L - 1.
+-    double tR = pow(toLinear([d redComponent]), 1.0 / 1.6);
+-    double tG = pow(toLinear([d greenComponent]), 1.0 / 1.6);
+-    double tB = pow(toLinear([d blueComponent]), 1.0 / 1.6);
+-    double Lt = LUM_R * tR + LUM_G * tG + LUM_B * tB;
+-    double L = (1.0 - Lt) / (f - 1.0);
+-    double r = pow(clamp01(tR + f * L - 1.0), 1.0 / 0.625);
+-    double g = pow(clamp01(tG + f * L - 1.0), 1.0 / 0.625);
+-    double b = pow(clamp01(tB + f * L - 1.0), 1.0 / 0.625);
+-    return [NSColor colorWithSRGBRed:fromLinear(r) green:fromLinear(g) blue:fromLinear(b) alpha:1.0];
++    // From out_i = (c_i - f_i*L + b_i)^1.6: t_i = out_i^(1/1.6); the luminance
++    // of both sides gives L = sum w_i (t_i - b_i) / (1 - sum w_i f_i);
++    // then c_i = t_i + f_i*L - b_i.
++    double t[3] = { pow(toLinear([d redComponent]), 1.0 / 1.6), pow(toLinear([d greenComponent]), 1.0 / 1.6), pow(toLinear([d blueComponent]), 1.0 / 1.6) };
++    double L = (LUM_R * (t[0] - p.b[0]) + LUM_G * (t[1] - p.b[1]) + LUM_B * (t[2] - p.b[2])) / (1.0 - wf);
++    double c[3];
++    for (int i = 0; i < 3; i++)
++        c[i] = fromLinear(pow(clamp01(t[i] + p.f[i] * L - p.b[i]), 1.0 / 0.625));
++    return [NSColor colorWithSRGBRed:c[0] green:c[1] blue:c[2] alpha:1.0];
+ }
+
+--- SKPlusPreferences.h
++++ SKPlusPreferences.h
+@@ -16,6 +16,7 @@
+     NSButton *invertBackgroundCheckbox;
+     NSSlider *invertBackgroundSlider;
+     NSTextField *invertBackgroundLabel;
++    NSColorWell *invertTextWell;
+     NSPopUpButton *toolTipModePopUp;
+     NSTextField *toolTipDelayField;
+     NSTextField *toolTipAutoHideField;
+
+--- SKPlusPreferences.m
++++ SKPlusPreferences.m
+@@ -87,6 +87,11 @@
+     [invertBackgroundSlider setControlSize:NSControlSizeSmall];
+     [[invertBackgroundSlider widthAnchor] constraintGreaterThanOrEqualToConstant:160.0].active = YES;
+     invertBackgroundLabel = SKPlusCaption(@"");
++    invertTextWell = [[NSColorWell alloc] init];
++    [invertTextWell setTarget:self];
++    [invertTextWell setAction:@selector(changeInvertText:)];
++    NSButton *resetInvertText = [NSButton buttonWithTitle:NSLocalizedString(@"Stock", @"Button title") target:self action:@selector(resetInvertText:)];
++    [resetInvertText setControlSize:NSControlSizeSmall];
+ 
+     // --- Tooltips ---
+     toolTipModePopUp = [[NSPopUpButton alloc] init];
+@@ -117,13 +122,14 @@
+     NSButton *resetDarkFS = [NSButton buttonWithTitle:NSLocalizedString(@"Stock", @"Button title") target:self action:@selector(resetDarkFullScreenBackground:)];
+     [resetDark setControlSize:NSControlSizeSmall];
+     [resetDarkFS setControlSize:NSControlSizeSmall];
+-    for (NSColorWell *well in @[darkBackgroundWell, darkFullScreenBackgroundWell]) {
++    for (NSColorWell *well in @[darkBackgroundWell, darkFullScreenBackgroundWell, invertTextWell]) {
+         [[well widthAnchor] constraintEqualToConstant:44.0].active = YES;
+         [[well heightAnchor] constraintEqualToConstant:23.0].active = YES;
+     }
+     sequentialNumberingCheckbox = [NSButton checkboxWithTitle:NSLocalizedString(@"Use sequential page numbering", @"Checkbox title")
+                                                        target:self action:@selector(changeSequentialNumbering:)];
+ 
++    NSStackView *invertTextRow = [NSStackView stackViewWithViews:@[invertTextWell, resetInvertText]];
+     NSStackView *darkWellRow = [NSStackView stackViewWithViews:@[darkBackgroundWell, resetDark]];
+     NSStackView *darkFSWellRow = [NSStackView stackViewWithViews:@[darkFullScreenBackgroundWell, resetDarkFS]];
+ 
+@@ -131,6 +137,7 @@
+         @[SKPlusLabel(NSLocalizedString(@"Inverted page background:", @"")), invertBackgroundCheckbox],
+         @[[NSGridCell emptyContentView], invertBackgroundSlider],
+         @[[NSGridCell emptyContentView], invertBackgroundLabel],
++        @[SKPlusLabel(NSLocalizedString(@"Inverted text color:", @"")), invertTextRow],
+         @[SKPlusLabel(NSLocalizedString(@"Window background:", @"")), darkWellRow],
+         @[SKPlusLabel(NSLocalizedString(@"Full screen background:", @"")), darkFSWellRow],
+     ]];
+@@ -229,13 +236,13 @@
+     NSColor *fallback = [NSColor colorWithGenericGamma22White:0.17 alpha:1.0];
+     NSColor *bg = [sud colorForKey:SKDarkBackgroundColorKey] ?: fallback;
+     NSColor *bgFS = [sud colorForKey:SKDarkFullScreenBackgroundColorKey] ?: fallback;
++    SKPlusInvertParams p = SKPlusCurrentInvertParams();
+     if (SKPlusInvertRenderingActive()) {
+         // stored = the color the user wants to SEE; the render path
+         // pre-compensates. Snap the swatch to the filter's achievable gamut
+         // so out-of-gamut picks show what will actually render.
+-        double f = SKPlusCurrentInvertF();
+-        bg = SKPlusRenderedColor(SKPlusPreInvertedColor(bg, f), f);
+-        bgFS = SKPlusRenderedColor(SKPlusPreInvertedColor(bgFS, f), f);
++        bg = SKPlusRenderedColor(SKPlusPreInvertedColor(bg, p), p);
++        bgFS = SKPlusRenderedColor(SKPlusPreInvertedColor(bgFS, p), p);
+     }
+     // Never programmatically set an ACTIVE well: it echoes through the shared
+     // color panel asynchronously (after any reentrancy flag has reset) and
+@@ -244,6 +251,9 @@
+         [darkBackgroundWell setColor:bg];
+     if ([darkFullScreenBackgroundWell isActive] == NO)
+         [darkFullScreenBackgroundWell setColor:bgFS];
++    // the color originally black text lands on: white until one is chosen
++    if ([invertTextWell isActive] == NO)
++        [invertTextWell setColor:SKPlusInvertedTextColor(p)];
+ 
+     [sequentialNumberingCheckbox setState:[sud boolForKey:SKSequentialPageNumberingKey] ? NSControlStateValueOn : NSControlStateValueOff];
+     updatingControls = NO;
+@@ -327,6 +337,18 @@
+     [self updateControlsFromDefaults];
+ }
+ 
++- (void)changeInvertText:(id)sender {
++    if (updatingControls) return;
++    [[NSUserDefaults standardUserDefaults] setColor:[invertTextWell color] forKey:SKInvertedDarkModeTextColorKey];
++    // the factor moved with it, so the background wells' rendered appearance did too
++    [self updateControlsFromDefaults];
++}
++
++- (void)resetInvertText:(id)sender {
++    [[NSUserDefaults standardUserDefaults] removeObjectForKey:SKInvertedDarkModeTextColorKey];
++    [self updateControlsFromDefaults];
++}
++
+ - (void)changeSequentialNumbering:(id)sender {
+     [[NSUserDefaults standardUserDefaults] setBool:[sequentialNumberingCheckbox state] == NSControlStateValueOn forKey:SKSequentialPageNumberingKey];
+ }

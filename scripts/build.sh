@@ -36,7 +36,7 @@ import sys
 data = open(sys.argv[1], 'rb').read()
 # NB: assert only ObjC class names and string literals — C function names
 # (e.g. SKPlusInvertMath's) are stripped from release binaries.
-for key in (b'SKInvertedDarkModeBackgroundGray', b'SKToolTipDelay', b'SKToolTipAutoHideTime', b'SKPlusPreferences'):
+for key in (b'SKInvertedDarkModeBackgroundGray', b'SKInvertedDarkModeTextColor', b'SKToolTipDelay', b'SKToolTipAutoHideTime', b'SKPlusPreferences'):
     assert key in data, f"missing patched pref key: {key.decode()}"
 print("patches verified in binary")
 PY
