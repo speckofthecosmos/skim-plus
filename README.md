@@ -1,5 +1,14 @@
 # Skim+
 
+> **Archived, 2026-10-31. The main feature landed upstream in Skim 1.7.16.**
+> Stock Skim now has the hidden pref `SKInvertedColorsBackgroundWhite` (sRGB 0–1; `0` = true black), the same formula as patch 0001 under a different key name, and it pre-inverts the dark background colors the way patch 0004 did. Use stock Skim:
+>
+> ```
+> defaults write net.sourceforge.skim-app.skim SKInvertedColorsBackgroundWhite -float 0
+> ```
+>
+> If you used Skim+'s `SKInvertedDarkModeBackgroundGray`, set the new key instead. And if you'd stored a *white* dark background color to get black under the old invert, change it to black: stock 1.7.16+ renders the color you store. Restart Skim after changing the pref. The rest of this README describes Skim+ as it was; the release below stays downloadable but will not be updated.
+
 A small, automated patch set on top of [Skim](https://skim-app.sourceforge.io/), the macOS PDF reader. Not a fork: each upstream release is fetched from Skim's SVN, the patches in [`patches/`](patches/) are applied, and the result is built and published unmodified otherwise. In the tradition of patch-set distributions like ungoogled-chromium and Betterbird, this exists to carry a few features upstream has declined — nothing more.
 
 **Unaffiliated with the Skim project.** Please do not report bugs in these builds to the Skim maintainers; file them [here](../../issues) instead. This repository is maintained largely by automation (an AI agent watches upstream releases, rebuilds, and files issues when human attention is needed), with a human owner reviewing anything the automation flags.
